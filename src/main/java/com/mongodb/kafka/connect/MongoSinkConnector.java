@@ -87,7 +87,6 @@ public class MongoSinkConnector extends SinkConnector {
       sinkConfig = new MongoSinkConfig(connectorConfigs);
     } catch (Exception e) {
       final Config config = super.validate(connectorConfigs);
-      // The config could not be resolved, so validate the raw connection uri against the blocklist
       ConnectionUriBlocklist.validate(connectorConfigs, config);
       return config;
     }
