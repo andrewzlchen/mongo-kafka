@@ -35,19 +35,68 @@ import java.util.Set;
 import org.apache.kafka.common.config.Config;
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.config.ConfigValue;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 class ConnectionUriBlocklistTest {
 
   private static final String CONNECTION_URI = "connection.uri";
+  private static final String FILE_READING_OPTIONS =
+      "tlsCertificateKeyFile,tlsCertificateKeyFilePassword";
+
+  @AfterEach
+  void clearSettings() {
+    System.clearProperty(ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY);
+    System.clearProperty(ConnectionUriBlocklist.ALLOW_HOST_CREDENTIALS_PROPERTY);
+  }
 
   @Test
-  @DisplayName("Should default to blocking the file-reading connection string options")
-  void testDefaultBlockedOptions() {
+  @DisplayName("Should block nothing unless the administrator opts in")
+  void testBlocklistIsOptIn() {
+    assertEquals(emptyList(), ConnectionUriBlocklist.blockedOptions());
+    assertEquals(
+        emptyBlocked(),
+        ConnectionUriBlocklist.findBlockedOptions(
+            "mongodb://localhost:27017/?tlsCertificateKeyFile=/etc/passwd",
+            ConnectionUriBlocklist.blockedOptions()));
+    assertEquals(
+        "",
+        getErrorMessages(
+            validateConnectionUri("mongodb://localhost:27017/?tlsCertificateKeyFile=/etc/passwd")));
+  }
+
+  @Test
+  @DisplayName("Should parse the administrator's comma-separated blocklist")
+  void testParseBlockedOptions() {
+    assertEquals(emptyList(), ConnectionUriBlocklist.parseBlockedOptions(null));
+    assertEquals(emptyList(), ConnectionUriBlocklist.parseBlockedOptions(""));
+    assertEquals(
+        asList("tlsCertificateKeyFile", "replicaSet"),
+        ConnectionUriBlocklist.parseBlockedOptions(" tlsCertificateKeyFile , , replicaSet "));
+  }
+
+  @Test
+  @DisplayName("Should apply the blocklist from the system property")
+  void testSystemPropertyBlocksOptions() {
+    System.setProperty(ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY, FILE_READING_OPTIONS);
+
     assertEquals(
         asList("tlsCertificateKeyFile", "tlsCertificateKeyFilePassword"),
-        ConnectionUriBlocklist.DEFAULT_BLOCKED_OPTIONS);
+        ConnectionUriBlocklist.blockedOptions());
+    assertBlocked(
+        "mongodb://localhost:27017/?tlsCertificateKeyFile=/etc/passwd&connectTimeoutMS=1000",
+        "tlsCertificateKeyFile");
+    // The driver accepts ';' as an option separator
+    assertBlocked(
+        "mongodb://localhost:27017/?connectTimeoutMS=1000;tlsCertificateKeyFile=/etc/passwd",
+        "tlsCertificateKeyFile");
+    assertBlocked(
+        "mongodb://localhost:27017/?tlsCertificateKeyFilePassword=secret",
+        "tlsCertificateKeyFilePassword");
+    // Matching is case-insensitive
+    assertBlocked(
+        "mongodb://localhost:27017/?TLSCERTIFICATEKEYFILE=/etc/passwd", "TLSCERTIFICATEKEYFILE");
   }
 
   @Test
@@ -125,11 +174,12 @@ class ConnectionUriBlocklistTest {
   @Test
   @DisplayName("Should report multiple problems together")
   void testMultipleProblemsReportedTogether() {
-    Config config =
-        validateConnectionUri(
-            "mongodb://localhost:27017/?authMechanism=MONGODB-X509"
-                + "&tlsCertificateKeyFile=/etc/cert.pem&tlsCertificateKeyFilePassword=secret");
-    String errorMessages = getErrorMessages(config);
+    System.setProperty(ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY, FILE_READING_OPTIONS);
+    String errorMessages =
+        getErrorMessages(
+            validateConnectionUri(
+                "mongodb://localhost:27017/?authMechanism=MONGODB-X509"
+                    + "&tlsCertificateKeyFile=/etc/cert.pem&tlsCertificateKeyFilePassword=secret"));
     assertTrue(
         errorMessages.contains("MONGODB-X509"), "expected the mechanism, got: " + errorMessages);
     assertTrue(
@@ -140,10 +190,12 @@ class ConnectionUriBlocklistTest {
         "expected the second option, got: " + errorMessages);
     assertTrue(
         errorMessages.contains(
-            "options are blocked by the 'connection.uri.blocklist' configuration"),
+            "options are blocked by the '"
+                + ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY
+                + "' Connect worker setting"),
         "expected a single grouped sentence for the options, got: " + errorMessages);
     assertFalse(
-        errorMessages.contains("To allow it,"),
+        errorMessages.contains("remove it from"),
         "expected the plural remedy once, got: " + errorMessages);
   }
 
@@ -175,28 +227,12 @@ class ConnectionUriBlocklistTest {
   }
 
   @Test
-  @DisplayName("Should find blocked options in the connection string")
-  void testFindBlockedOptions() {
-    assertBlocked(
-        "mongodb://localhost:27017/?tlsCertificateKeyFile=/etc/passwd&connectTimeoutMS=1000",
-        "tlsCertificateKeyFile");
-    // The driver accepts ';' as an option separator
-    assertBlocked(
-        "mongodb://localhost:27017/?connectTimeoutMS=1000;tlsCertificateKeyFile=/etc/passwd",
-        "tlsCertificateKeyFile");
-    assertBlocked(
-        "mongodb://localhost:27017/?tlsCertificateKeyFilePassword=secret",
-        "tlsCertificateKeyFilePassword");
-  }
-
-  @Test
   @DisplayName("Should not match connection strings without a query")
   void testConnectionStringsWithoutQuery() {
     assertEquals(
         emptyBlocked(),
         ConnectionUriBlocklist.findBlockedOptions(
-            "mongodb://user:secret@localhost:27017",
-            ConnectionUriBlocklist.DEFAULT_BLOCKED_OPTIONS));
+            "mongodb://user:secret@localhost:27017", singletonList("tlsCertificateKeyFile")));
   }
 
   @Test
@@ -227,13 +263,13 @@ class ConnectionUriBlocklistTest {
   @Test
   @DisplayName("Should throw without exposing the connection string")
   void testValidateConnectionStringOptions() {
+    System.setProperty(ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY, FILE_READING_OPTIONS);
+
     String uri = "mongodb://localhost:27017/?authMechanism=MONGODB-AWS";
     ConfigException e =
         assertThrows(
             ConfigException.class,
-            () ->
-                ConnectionUriBlocklist.validateConnectionStringOptions(
-                    CONNECTION_URI, uri, ConnectionUriBlocklist.DEFAULT_BLOCKED_OPTIONS, false));
+            () -> ConnectionUriBlocklist.validateConnectionStringOptions(CONNECTION_URI, uri));
     assertTrue(
         e.getMessage().contains("MONGODB-AWS"),
         "expected the mechanism to be named, got: " + e.getMessage());
@@ -246,10 +282,7 @@ class ConnectionUriBlocklistTest {
             ConfigException.class,
             () ->
                 ConnectionUriBlocklist.validateConnectionStringOptions(
-                    CONNECTION_URI,
-                    uriWithBlockedOption,
-                    ConnectionUriBlocklist.DEFAULT_BLOCKED_OPTIONS,
-                    false));
+                    CONNECTION_URI, uriWithBlockedOption));
     assertTrue(
         e2.getMessage().contains("tlsCertificateKeyFile"),
         "expected the blocked option to be named, got: " + e2.getMessage());
@@ -270,41 +303,42 @@ class ConnectionUriBlocklistTest {
   }
 
   @Test
-  @DisplayName("Should respect a raw blocklist property")
-  void testValidateRawPropertiesWithCustomBlocklist() {
+  @DisplayName("Should respect the system property blocklist")
+  void testValidateRawPropertiesWithBlockedOptions() {
+    System.setProperty(ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY, "connectTimeoutMS");
     Map<String, String> props = new HashMap<>();
     props.put(CONNECTION_URI, "mongodb://localhost:27017/?proxyHost=attacker.example");
-    props.put(
-        ConnectionUriBlocklist.CONNECTION_URI_BLOCKLIST_CONFIG, " connectTimeoutMS , replicaSet ");
     Config config = new Config(singletonList(new ConfigValue(CONNECTION_URI)));
     ConnectionUriBlocklist.validate(props, config);
     assertEquals("", getErrorMessages(config));
 
-    props.put(
-        ConnectionUriBlocklist.CONNECTION_URI_BLOCKLIST_CONFIG, " connectTimeoutMS , proxyHost ");
+    props.put(CONNECTION_URI, "mongodb://localhost:27017/?connectTimeoutMS=1000");
     config = new Config(singletonList(new ConfigValue(CONNECTION_URI)));
     ConnectionUriBlocklist.validate(props, config);
     assertTrue(
-        getErrorMessages(config).contains("proxyHost"),
-        "expected the custom blocklist to be applied, got: " + getErrorMessages(config));
+        getErrorMessages(config).contains("connectTimeoutMS"),
+        "expected the blocked option to be applied, got: " + getErrorMessages(config));
   }
 
   @Test
-  @DisplayName("Should allow ambient mechanisms when host credentials are allowed")
-  void testAmbientMechanismsAllowedWithConfig() {
+  @DisplayName("Should allow ambient mechanisms when the administrator allows host credentials")
+  void testAmbientMechanismsAllowedWithSetting() {
     String uri = "mongodb://localhost:27017/?authMechanism=MONGODB-AWS";
+    assertFalse(ConnectionUriBlocklist.allowHostCredentials());
     assertNull(ConnectionUriBlocklist.findAmbientMechanismProblem(uri, true));
-    ConnectionUriBlocklist.validateConnectionStringOptions(
-        CONNECTION_URI, uri, ConnectionUriBlocklist.DEFAULT_BLOCKED_OPTIONS, true);
+
+    System.setProperty(ConnectionUriBlocklist.ALLOW_HOST_CREDENTIALS_PROPERTY, "true");
+    assertTrue(ConnectionUriBlocklist.allowHostCredentials());
+    ConnectionUriBlocklist.validateConnectionStringOptions(CONNECTION_URI, uri);
 
     Map<String, String> props = new HashMap<>();
     props.put(CONNECTION_URI, uri);
-    props.put(ConnectionUriBlocklist.CONNECTION_URI_ALLOW_HOST_CREDENTIALS_CONFIG, "true");
     Config config = new Config(singletonList(new ConfigValue(CONNECTION_URI)));
     assertFalse(ConnectionUriBlocklist.validate(props, config));
     assertEquals("", getErrorMessages(config));
 
     // Blocked options are still enforced
+    System.setProperty(ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY, "tlsCertificateKeyFile");
     Config blockedConfig = new Config(singletonList(new ConfigValue(CONNECTION_URI)));
     Map<String, String> propsWithBlockedOption = new HashMap<>(props);
     propsWithBlockedOption.put(
@@ -316,17 +350,26 @@ class ConnectionUriBlocklistTest {
   }
 
   @Test
-  @DisplayName("Should always reject ambient mechanisms, even with an empty blocklist")
-  void testAmbientMechanismsAreRejectedWithEmptyBlocklist() {
-    Map<String, String> props =
-        singletonMap(CONNECTION_URI, "mongodb://localhost:27017/?authMechanism=MONGODB-OIDC");
-    props = new HashMap<>(props);
-    props.put(ConnectionUriBlocklist.CONNECTION_URI_BLOCKLIST_CONFIG, "");
+  @DisplayName("Should not let connector properties relax the worker's policy")
+  void testConnectorPropertiesCannotOverridePolicy() {
+    System.setProperty(ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY, "tlsCertificateKeyFile");
+    Map<String, String> props = new HashMap<>();
+    props.put(
+        CONNECTION_URI,
+        "mongodb://localhost:27017/?authMechanism=MONGODB-AWS&tlsCertificateKeyFile=/etc/passwd");
+    // The connector-level properties from the previous design must have no effect
+    props.put("connection.uri.blocklist", "");
+    props.put("connection.uri.allow.host.credentials", "true");
+
     Config config = new Config(singletonList(new ConfigValue(CONNECTION_URI)));
-    ConnectionUriBlocklist.validate(props, config);
+    assertTrue(ConnectionUriBlocklist.validate(props, config));
+    String errorMessages = getErrorMessages(config);
     assertTrue(
-        getErrorMessages(config).contains("MONGODB-OIDC"),
-        "expected the ambient mechanism to be rejected, got: " + getErrorMessages(config));
+        errorMessages.contains("tlsCertificateKeyFile"),
+        "expected the administrator's blocklist to be enforced, got: " + errorMessages);
+    assertTrue(
+        errorMessages.contains("MONGODB-AWS"),
+        "expected the ambient mechanism to be rejected, got: " + errorMessages);
   }
 
   private static Config validateConnectionUri(final String uri) {
@@ -352,7 +395,7 @@ class ConnectionUriBlocklistTest {
     assertEquals(
         blocked(expected),
         ConnectionUriBlocklist.findBlockedOptions(
-            connectionString, ConnectionUriBlocklist.DEFAULT_BLOCKED_OPTIONS));
+            connectionString, ConnectionUriBlocklist.blockedOptions()));
   }
 
   private static Set<String> emptyBlocked() {

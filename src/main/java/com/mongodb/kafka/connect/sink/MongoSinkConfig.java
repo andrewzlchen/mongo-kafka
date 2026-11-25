@@ -168,10 +168,7 @@ public class MongoSinkConfig extends AbstractConfig {
     }
 
     ConnectionUriBlocklist.validateConnectionStringOptions(
-        CONNECTION_URI_CONFIG,
-        getPassword(CONNECTION_URI_CONFIG).value(),
-        getList(ConnectionUriBlocklist.CONNECTION_URI_BLOCKLIST_CONFIG),
-        getBoolean(ConnectionUriBlocklist.CONNECTION_URI_ALLOW_HOST_CREDENTIALS_CONFIG));
+        CONNECTION_URI_CONFIG, getPassword(CONNECTION_URI_CONFIG).value());
     connectionString = new ConnectionString(getPassword(CONNECTION_URI_CONFIG).value());
     topicSinkConnectorConfigMap =
         new ConcurrentHashMap<>(
@@ -374,8 +371,6 @@ public class MongoSinkConfig extends AbstractConfig {
         ++orderInGroup,
         Width.MEDIUM,
         CONNECTION_URI_DISPLAY);
-
-    ConnectionUriBlocklist.addConfigDef(configDef, group, ++orderInGroup);
 
     addServerApiConfig(configDef);
     addSslConfigDef(configDef);

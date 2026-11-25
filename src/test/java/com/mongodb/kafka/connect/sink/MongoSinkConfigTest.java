@@ -158,7 +158,7 @@ class MongoSinkConfigTest {
     assertAll(
         "connection uri blocklist",
         () -> {
-          // Authentication mechanisms that fall back to the host environment are always rejected
+          // Authentication mechanisms that use the host environment are rejected by default
           Exception e =
               assertThrows(
                   ConfigException.class,
@@ -177,54 +177,62 @@ class MongoSinkConfigTest {
                       CONNECTION_URI_CONFIG,
                       "mongodb://user:pass@localhost:27017/?authMechanism=MONGODB-AWS"));
         },
-        () -> {
-          // Host credential mechanisms can be allowed explicitly
-          Map<String, String> configMap =
-              createConfigMap(
-                  CONNECTION_URI_CONFIG, "mongodb://localhost:27017/?authMechanism=MONGODB-AWS");
-          configMap.put(
-              ConnectionUriBlocklist.CONNECTION_URI_ALLOW_HOST_CREDENTIALS_CONFIG, "true");
-          new MongoSinkConfig(configMap);
-        },
         () ->
-            // Non-blocked options are allowed
-            new MongoSinkConfig(
-                createConfigMap(
-                    CONNECTION_URI_CONFIG, "mongodb://localhost:27017/?connectTimeoutMS=1000")),
-        () -> {
-          // The blocklist can be changed
-          Map<String, String> configMap =
-              createConfigMap(
-                  CONNECTION_URI_CONFIG,
-                  "mongodb://localhost:27017/?tlsCertificateKeyFile=/etc/cert.pem");
-          // tlsCertificateKeyFile is rejected by default. Update the block list to allow it.
-          configMap.put(ConnectionUriBlocklist.CONNECTION_URI_BLOCKLIST_CONFIG, "replicaSet");
-          new MongoSinkConfig(configMap);
-        },
-        () -> {
-          // The blocklist can be disabled
-          Map<String, String> configMap =
-              createConfigMap(
-                  CONNECTION_URI_CONFIG,
-                  "mongodb://localhost:27017/?tlsCertificateKeyFile=/etc/cert.pem");
-          configMap.put(ConnectionUriBlocklist.CONNECTION_URI_BLOCKLIST_CONFIG, "");
-          new MongoSinkConfig(configMap);
-        },
-        () ->
-            // Custom blocked options are enforced
-            assertThrows(
-                ConfigException.class,
+            // Host credential mechanisms can be allowed by the worker administrator
+            withSetting(
+                ConnectionUriBlocklist.ALLOW_HOST_CREDENTIALS_PROPERTY,
+                "true",
                 () ->
                     new MongoSinkConfig(
-                        createConfigMapWithUriAndBlocklist(
-                            "mongodb://localhost:27017/?replicaSet=rs0"))));
+                        createConfigMap(
+                            CONNECTION_URI_CONFIG,
+                            "mongodb://localhost:27017/?authMechanism=MONGODB-AWS"))),
+        () ->
+            // Nothing is blocked unless the administrator opts in
+            new MongoSinkConfig(
+                createConfigMap(
+                    CONNECTION_URI_CONFIG,
+                    "mongodb://localhost:27017/?tlsCertificateKeyFile=/etc/cert.pem")),
+        () ->
+            // The administrator's blocklist is enforced
+            withSetting(
+                ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY,
+                "replicaSet",
+                () ->
+                    assertThrows(
+                        ConfigException.class,
+                        () ->
+                            new MongoSinkConfig(
+                                createConfigMap(
+                                    CONNECTION_URI_CONFIG,
+                                    "mongodb://localhost:27017/?replicaSet=rs0")))),
+        () ->
+            // Connector properties cannot disable the administrator's blocklist
+            withSetting(
+                ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY,
+                "replicaSet",
+                () -> {
+                  Map<String, String> configMap =
+                      createConfigMap(
+                          CONNECTION_URI_CONFIG, "mongodb://localhost:27017/?replicaSet=rs0");
+                  configMap.put("connection.uri.blocklist", "");
+                  assertThrows(ConfigException.class, () -> new MongoSinkConfig(configMap));
+                }));
   }
 
-  private static Map<String, String> createConfigMapWithUriAndBlocklist(final String uri) {
-    Map<String, String> configMap = createConfigMap(CONNECTION_URI_CONFIG, uri);
-    configMap.put(
-        ConnectionUriBlocklist.CONNECTION_URI_BLOCKLIST_CONFIG, "replicaSet,connectTimeoutMS");
-    return configMap;
+  private static void withSetting(
+      final String property, final String value, final Runnable action) {
+    String previous = System.getProperty(property);
+    System.setProperty(property, value);
+    try {
+      action.run();
+    } finally {
+      if (previous == null) {
+        System.clearProperty(property);
+      } else {
+        System.setProperty(property, previous);
+      }
+    }
   }
 
   @Test

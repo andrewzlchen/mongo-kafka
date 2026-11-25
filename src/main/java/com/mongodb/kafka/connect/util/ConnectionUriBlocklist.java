@@ -18,8 +18,7 @@ package com.mongodb.kafka.connect.util;
 
 import static com.mongodb.kafka.connect.util.ConfigHelper.getConfigByName;
 import static java.lang.String.format;
-import static java.util.Arrays.asList;
-import static java.util.Collections.unmodifiableList;
+import static java.util.Collections.emptyList;
 import static java.util.Locale.ROOT;
 
 import java.net.URLDecoder;
@@ -35,111 +34,83 @@ import java.util.stream.Collectors;
 
 import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.common.config.Config;
-import org.apache.kafka.common.config.ConfigDef;
-import org.apache.kafka.common.config.ConfigDef.Importance;
-import org.apache.kafka.common.config.ConfigDef.Type;
-import org.apache.kafka.common.config.ConfigDef.Width;
 import org.apache.kafka.common.config.types.Password;
 
 public final class ConnectionUriBlocklist {
 
-  public static final String CONNECTION_URI_BLOCKLIST_CONFIG = "connection.uri.blocklist";
-  public static final String CONNECTION_URI_ALLOW_HOST_CREDENTIALS_CONFIG =
-      "connection.uri.allow.host.credentials";
+  public static final String BLOCKED_OPTIONS_PROPERTY =
+      "mongodb.kafka.connect.connection.uri.blocked.options";
+  public static final String BLOCKED_OPTIONS_ENV_VAR =
+      "MONGODB_KAFKA_CONNECT_CONNECTION_URI_BLOCKED_OPTIONS";
+  public static final String ALLOW_HOST_CREDENTIALS_PROPERTY =
+      "mongodb.kafka.connect.connection.uri.allow.host.credentials";
+  public static final String ALLOW_HOST_CREDENTIALS_ENV_VAR =
+      "MONGODB_KAFKA_CONNECT_CONNECTION_URI_ALLOW_HOST_CREDENTIALS";
+
   private static final String CONNECTION_URI_CONFIG = "connection.uri";
-  private static final String CONNECTION_URI_BLOCKLIST_DISPLAY = "Connection URI blocklist";
-  private static final String CONNECTION_URI_ALLOW_HOST_CREDENTIALS_DISPLAY =
-      "Allow host credential auth mechanisms";
-  private static final boolean CONNECTION_URI_ALLOW_HOST_CREDENTIALS_DEFAULT = false;
-  private static final String CONNECTION_URI_ALLOW_HOST_CREDENTIALS_DOC =
-      "Whether connection URIs may use authentication mechanisms that obtain credentials from "
-          + "the host environment, such as MONGODB-AWS without credentials in the URI, "
-          + "MONGODB-OIDC, GSSAPI and MONGODB-X509. Disabled by default; prefer the 'provider' "
-          + "configuration where possible.";
-
-  /** Connection string options that make the driver read files from the host's file system. */
-  public static final List<String> DEFAULT_BLOCKED_OPTIONS =
-      unmodifiableList(asList("tlsCertificateKeyFile", "tlsCertificateKeyFilePassword"));
-
-  private static final String CONNECTION_URI_BLOCKLIST_DOC =
-      "A list of connection string options that are not allowed in 'connection.uri'. "
-          + "This prevents connection strings from making the driver read files from the host "
-          + "environment. Defaults to: "
-          + String.join(", ", DEFAULT_BLOCKED_OPTIONS)
-          + ". Set to an empty list to disable the blocklist.";
 
   private static final String AMBIENT_MECHANISM_PROBLEM =
-      "The '%s' authentication mechanism is blocked.";
+      "The '%s' authentication mechanism is blocked. An administrator can set the '%s' Connect "
+          + "worker setting to true to allow it.";
   private static final String BLOCKED_OPTION_PROBLEM =
-      "The %s connection URI option is blocked by the '%s' configuration. To allow it, remove it "
-          + "from the blocklist.";
+      "The %s connection URI option is blocked by the '%s' Connect worker setting. An "
+          + "administrator can remove it from that setting to allow it.";
   private static final String BLOCKED_OPTIONS_PROBLEM =
-      "The %s connection URI options are blocked by the '%s' configuration. To allow them, remove "
-          + "them from the blocklist.";
-
-  public static void addConfigDef(
-      final ConfigDef configDef, final String group, final int orderInGroup) {
-    configDef.define(
-        CONNECTION_URI_BLOCKLIST_CONFIG,
-        Type.LIST,
-        DEFAULT_BLOCKED_OPTIONS,
-        Importance.MEDIUM,
-        CONNECTION_URI_BLOCKLIST_DOC,
-        group,
-        orderInGroup,
-        Width.MEDIUM,
-        CONNECTION_URI_BLOCKLIST_DISPLAY);
-    configDef.define(
-        CONNECTION_URI_ALLOW_HOST_CREDENTIALS_CONFIG,
-        Type.BOOLEAN,
-        CONNECTION_URI_ALLOW_HOST_CREDENTIALS_DEFAULT,
-        Importance.MEDIUM,
-        CONNECTION_URI_ALLOW_HOST_CREDENTIALS_DOC,
-        group,
-        orderInGroup + 1,
-        Width.MEDIUM,
-        CONNECTION_URI_ALLOW_HOST_CREDENTIALS_DISPLAY);
-  }
+      "The %s connection URI options are blocked by the '%s' Connect worker setting. An "
+          + "administrator can remove them from that setting to allow them.";
 
   public static boolean validate(final AbstractConfig connectorConfig, final Config config) {
-    List<String> blocklist = connectorConfig.getList(CONNECTION_URI_BLOCKLIST_CONFIG);
-    boolean allowHostCredentials =
-        connectorConfig.getBoolean(CONNECTION_URI_ALLOW_HOST_CREDENTIALS_CONFIG);
     String connectionString = connectorConfig.getPassword(CONNECTION_URI_CONFIG).value();
-    return addErrorMessagesIfInvalid(connectionString, blocklist, allowHostCredentials, config);
+    return addErrorMessagesIfInvalid(connectionString, config);
   }
 
   public static boolean validate(
       final Map<String, String> connectorProperties, final Config config) {
-    String blocklistValue = connectorProperties.get(CONNECTION_URI_BLOCKLIST_CONFIG);
-    List<String> blocklist =
-        blocklistValue == null ? DEFAULT_BLOCKED_OPTIONS : parseList(blocklistValue);
-    boolean allowHostCredentials =
-        Boolean.parseBoolean(
-            connectorProperties.getOrDefault(
-                CONNECTION_URI_ALLOW_HOST_CREDENTIALS_CONFIG,
-                String.valueOf(CONNECTION_URI_ALLOW_HOST_CREDENTIALS_DEFAULT)));
     String connectionString = connectorProperties.getOrDefault(CONNECTION_URI_CONFIG, "");
-    return addErrorMessagesIfInvalid(connectionString, blocklist, allowHostCredentials, config);
+    return addErrorMessagesIfInvalid(connectionString, config);
   }
 
   public static void validateConnectionStringOptions(
-      final String configName,
-      final String connectionString,
-      final List<String> blocklist,
-      final boolean allowHostCredentials) {
-    List<String> problems = findProblems(connectionString, blocklist, allowHostCredentials);
+      final String configName, final String connectionString) {
+    List<String> problems =
+        findProblems(connectionString, blockedOptions(), allowHostCredentials());
     if (!problems.isEmpty()) {
       throw new ConnectConfigException(configName, Password.HIDDEN, String.join(" ", problems));
     }
   }
 
+  /** The connection string options blocked by the worker administrator. Read on every call. */
+  static List<String> blockedOptions() {
+    return parseBlockedOptions(setting(BLOCKED_OPTIONS_PROPERTY, BLOCKED_OPTIONS_ENV_VAR));
+  }
+
+  /**
+   * Whether the worker administrator allows authentication mechanisms that use host credentials.
+   */
+  static boolean allowHostCredentials() {
+    String value = setting(ALLOW_HOST_CREDENTIALS_PROPERTY, ALLOW_HOST_CREDENTIALS_ENV_VAR);
+    return value != null && Boolean.parseBoolean(value.trim());
+  }
+
+  private static String setting(final String systemProperty, final String environmentVariable) {
+    String value = System.getProperty(systemProperty);
+    return value != null ? value : System.getenv(environmentVariable);
+  }
+
+  static List<String> parseBlockedOptions(final String listValue) {
+    if (listValue == null) {
+      return emptyList();
+    }
+    return Arrays.stream(listValue.split(","))
+        .map(String::trim)
+        .filter(s -> !s.isEmpty())
+        .collect(Collectors.toList());
+  }
+
   private static boolean addErrorMessagesIfInvalid(
-      final String connectionString,
-      final List<String> blocklist,
-      final boolean allowHostCredentials,
-      final Config config) {
-    List<String> problems = findProblems(connectionString, blocklist, allowHostCredentials);
+      final String connectionString, final Config config) {
+    List<String> problems =
+        findProblems(connectionString, blockedOptions(), allowHostCredentials());
     if (problems.isEmpty()) {
       return false;
     }
@@ -169,7 +140,7 @@ public final class ConnectionUriBlocklist {
           format(
               blockedOptions.size() == 1 ? BLOCKED_OPTION_PROBLEM : BLOCKED_OPTIONS_PROBLEM,
               joinOptions(blockedOptions),
-              CONNECTION_URI_BLOCKLIST_CONFIG));
+              BLOCKED_OPTIONS_PROPERTY));
     }
     return problems;
   }
@@ -196,13 +167,13 @@ public final class ConnectionUriBlocklist {
     }
     switch (authMechanism.toUpperCase(ROOT)) {
       case "MONGODB-AWS":
-        return format(AMBIENT_MECHANISM_PROBLEM, "MONGODB-AWS");
+        return format(AMBIENT_MECHANISM_PROBLEM, "MONGODB-AWS", ALLOW_HOST_CREDENTIALS_PROPERTY);
       case "MONGODB-OIDC":
-        return format(AMBIENT_MECHANISM_PROBLEM, "MONGODB-OIDC");
+        return format(AMBIENT_MECHANISM_PROBLEM, "MONGODB-OIDC", ALLOW_HOST_CREDENTIALS_PROPERTY);
       case "GSSAPI":
-        return format(AMBIENT_MECHANISM_PROBLEM, "GSSAPI");
+        return format(AMBIENT_MECHANISM_PROBLEM, "GSSAPI", ALLOW_HOST_CREDENTIALS_PROPERTY);
       case "MONGODB-X509":
-        return format(AMBIENT_MECHANISM_PROBLEM, "MONGODB-X509");
+        return format(AMBIENT_MECHANISM_PROBLEM, "MONGODB-X509", ALLOW_HOST_CREDENTIALS_PROPERTY);
       default:
         return null;
     }
@@ -265,13 +236,6 @@ public final class ConnectionUriBlocklist {
     } catch (Exception e) {
       return value;
     }
-  }
-
-  private static List<String> parseList(final String listValue) {
-    return Arrays.stream(listValue.split(","))
-        .map(String::trim)
-        .filter(s -> !s.isEmpty())
-        .collect(Collectors.toList());
   }
 
   private ConnectionUriBlocklist() {}

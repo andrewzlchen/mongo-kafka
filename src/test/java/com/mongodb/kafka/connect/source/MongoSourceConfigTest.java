@@ -134,7 +134,7 @@ class MongoSourceConfigTest {
     assertAll(
         "connection uri blocklist",
         () -> {
-          // Blocked options are rejected by default
+          // Authentication mechanisms that use the host environment are rejected by default
           Exception e =
               assertThrows(
                   ConfigException.class,
@@ -153,45 +153,61 @@ class MongoSourceConfigTest {
                       CONNECTION_URI_CONFIG,
                       "mongodb://user:pass@localhost:27017/?authMechanism=MONGODB-AWS"));
         },
-        () -> {
-          // Host credential mechanisms can be allowed explicitly
-          Map<String, String> configMap =
-              createConfigMap(
-                  CONNECTION_URI_CONFIG, "mongodb://localhost:27017/?authMechanism=MONGODB-AWS");
-          configMap.put(
-              ConnectionUriBlocklist.CONNECTION_URI_ALLOW_HOST_CREDENTIALS_CONFIG, "true");
-          new MongoSourceConfig(configMap);
-        },
         () ->
-            // Non-blocked options are allowed
+            // Host credential mechanisms can be allowed by the worker administrator
+            withSetting(
+                ConnectionUriBlocklist.ALLOW_HOST_CREDENTIALS_PROPERTY,
+                "true",
+                () ->
+                    new MongoSourceConfig(
+                        createConfigMap(
+                            CONNECTION_URI_CONFIG,
+                            "mongodb://localhost:27017/?authMechanism=MONGODB-AWS"))),
+        () ->
+            // Nothing is blocked unless the administrator opts in
             createSourceConfig(
-                CONNECTION_URI_CONFIG, "mongodb://localhost:27017/?connectTimeoutMS=1000"),
-        () -> {
-          // The blocklist can be changed
-          Map<String, String> configMap =
-              createConfigMap(
-                  CONNECTION_URI_CONFIG,
-                  "mongodb://localhost:27017/?tlsCertificateKeyFile=/etc/cert.pem");
-          // tlsCertificateKeyFile is rejected by default. Update the block list to allow it.
-          configMap.put(ConnectionUriBlocklist.CONNECTION_URI_BLOCKLIST_CONFIG, "replicaSet");
-          createSourceConfig(configMap);
-        },
-        () -> {
-          // The blocklist can be disabled
-          Map<String, String> configMap =
-              createConfigMap(
-                  CONNECTION_URI_CONFIG,
-                  "mongodb://localhost:27017/?tlsCertificateKeyFile=/etc/cert.pem");
-          configMap.put(ConnectionUriBlocklist.CONNECTION_URI_BLOCKLIST_CONFIG, "");
-          createSourceConfig(configMap);
-        },
-        () -> {
-          // Custom blocked options are enforced
-          Map<String, String> configMap =
-              createConfigMap(CONNECTION_URI_CONFIG, "mongodb://localhost:27017/?replicaSet=rs0");
-          configMap.put(ConnectionUriBlocklist.CONNECTION_URI_BLOCKLIST_CONFIG, "replicaSet");
-          assertThrows(ConfigException.class, () -> createSourceConfig(configMap));
-        });
+                CONNECTION_URI_CONFIG,
+                "mongodb://localhost:27017/?tlsCertificateKeyFile=/etc/cert.pem"),
+        () ->
+            // The administrator's blocklist is enforced
+            withSetting(
+                ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY,
+                "replicaSet",
+                () ->
+                    assertThrows(
+                        ConfigException.class,
+                        () ->
+                            new MongoSourceConfig(
+                                createConfigMap(
+                                    CONNECTION_URI_CONFIG,
+                                    "mongodb://localhost:27017/?replicaSet=rs0")))),
+        () ->
+            // Connector properties cannot disable the administrator's blocklist
+            withSetting(
+                ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY,
+                "replicaSet",
+                () -> {
+                  Map<String, String> configMap =
+                      createConfigMap(
+                          CONNECTION_URI_CONFIG, "mongodb://localhost:27017/?replicaSet=rs0");
+                  configMap.put("connection.uri.blocklist", "");
+                  assertThrows(ConfigException.class, () -> new MongoSourceConfig(configMap));
+                }));
+  }
+
+  private static void withSetting(
+      final String property, final String value, final Runnable action) {
+    String previous = System.getProperty(property);
+    System.setProperty(property, value);
+    try {
+      action.run();
+    } finally {
+      if (previous == null) {
+        System.clearProperty(property);
+      } else {
+        System.setProperty(property, previous);
+      }
+    }
   }
 
   @Test

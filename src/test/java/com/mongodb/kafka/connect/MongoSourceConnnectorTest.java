@@ -152,36 +152,43 @@ class MongoSourceConnnectorTest {
   }
 
   @Test
-  @DisplayName("Should allow connection.uri options removed from the blocklist")
-  void testValidateAllowsOptionsRemovedFromBlocklist() {
+  @DisplayName("Should enforce the worker administrator's connection.uri blocklist")
+  void testValidateEnforcesAdministratorBlocklist() {
     MongoSourceConnector sourceConnector = new MongoSourceConnector();
     String uri =
         "mongodb://localhost:27017/?tlsCertificateKeyFile=/etc/cert.pem&connectTimeoutMS=300";
 
-    // The option is rejected with the default blocklist
-    Map<String, String> blockedConfigs = new HashMap<>();
-    blockedConfigs.put(CONNECTION_URI_CONFIG, uri);
+    Map<String, String> configs = new HashMap<>();
+    configs.put(CONNECTION_URI_CONFIG, uri);
+    // A connector property must not be able to disable the administrator's policy
+    configs.put("connection.uri.blocklist", "");
 
-    Optional<ConfigValue> blockedUriValue =
-        ConfigHelper.getConfigByName(
-            sourceConnector.validate(blockedConfigs), CONNECTION_URI_CONFIG);
-    assertTrue(blockedUriValue.isPresent());
+    // Nothing is blocked unless the administrator opts in
+    List<String> defaultErrors = connectionUriErrors(sourceConnector.validate(configs));
     assertTrue(
-        blockedUriValue.get().errorMessages().stream()
-            .anyMatch(m -> m.contains("blocked by the 'connection.uri.blocklist' configuration")),
-        "connection.uri should be reported as blocked: " + blockedUriValue.get().errorMessages());
+        defaultErrors.stream().noneMatch(m -> m.contains("'tlsCertificateKeyFile'")),
+        "connection.uri must not be reported as blocked: " + defaultErrors);
 
-    // Removing the option from the blocklist allows it
-    Map<String, String> allowedConfigs = new HashMap<>(blockedConfigs);
-    allowedConfigs.put(ConnectionUriBlocklist.CONNECTION_URI_BLOCKLIST_CONFIG, "");
+    // The administrator can opt in to blocking the option
+    String previous = System.getProperty(ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY);
+    System.setProperty(ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY, "tlsCertificateKeyFile");
+    try {
+      List<String> errors = connectionUriErrors(sourceConnector.validate(configs));
+      assertTrue(
+          errors.stream().anyMatch(m -> m.contains("'tlsCertificateKeyFile'")),
+          "connection.uri should be reported as blocked: " + errors);
+    } finally {
+      if (previous == null) {
+        System.clearProperty(ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY);
+      } else {
+        System.setProperty(ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY, previous);
+      }
+    }
+  }
 
-    Optional<ConfigValue> allowedUriValue =
-        ConfigHelper.getConfigByName(
-            sourceConnector.validate(allowedConfigs), CONNECTION_URI_CONFIG);
-    assertTrue(allowedUriValue.isPresent());
-    assertTrue(
-        allowedUriValue.get().errorMessages().stream()
-            .noneMatch(m -> m.contains("blocked by the 'connection.uri.blocklist' configuration")),
-        "connection.uri must not be reported as blocked: " + allowedUriValue.get().errorMessages());
+  private static List<String> connectionUriErrors(final Config config) {
+    Optional<ConfigValue> uriValue = ConfigHelper.getConfigByName(config, CONNECTION_URI_CONFIG);
+    assertTrue(uriValue.isPresent());
+    return uriValue.get().errorMessages();
   }
 }
