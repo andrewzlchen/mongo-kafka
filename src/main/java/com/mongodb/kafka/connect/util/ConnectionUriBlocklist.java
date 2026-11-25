@@ -27,6 +27,7 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -235,17 +236,24 @@ public final class ConnectionUriBlocklist {
     if (queryStart < 0) {
       return new LinkedHashSet<>();
     }
-    Set<String> lowerCaseBlocklist =
-        blocklist.stream().map(o -> o.trim().toLowerCase(Locale.ROOT)).collect(Collectors.toSet());
+    Set<String> normalisedBlocklist = new HashSet<>();
+    for (String blockedOption : blocklist) {
+      String trimmed = blockedOption.trim();
+      normalisedBlocklist.add(trimmed.toLowerCase(Locale.ROOT));
+      // The driver lowercases option names with the default locale, not Locale.ROOT
+      normalisedBlocklist.add(trimmed.toLowerCase());
+    }
     Set<String> blockedOptions = new LinkedHashSet<>();
     Set<String> seenOptions = new LinkedHashSet<>();
     for (String option : connectionString.substring(queryStart + 1).split("&|;")) {
       int valueStart = option.indexOf('=');
-      // Option names are matched exactly as the driver parses them: lowercased, but not trimmed.
+      // Option names are matched as the driver parses them: lowercased, but not trimmed
       String optionName = valueStart >= 0 ? option.substring(0, valueStart) : option;
+      String rootName = optionName.toLowerCase(Locale.ROOT);
+      String driverName = optionName.toLowerCase();
       if (!optionName.isEmpty()
-          && lowerCaseBlocklist.contains(optionName.toLowerCase(Locale.ROOT))
-          && seenOptions.add(optionName.toLowerCase(Locale.ROOT))) {
+          && (normalisedBlocklist.contains(rootName) || normalisedBlocklist.contains(driverName))
+          && seenOptions.add(driverName)) {
         // Preserve the option name as written in the connection string for the error message
         blockedOptions.add(optionName);
       }
@@ -262,9 +270,13 @@ public final class ConnectionUriBlocklist {
     String value = null;
     for (String option : connectionString.substring(queryStart + 1).split("&|;")) {
       int valueStart = option.indexOf('=');
-      // Option names are matched exactly as the driver parses them: lowercased, but not trimmed
-      String name = (valueStart >= 0 ? option.substring(0, valueStart) : option).toLowerCase(ROOT);
-      if (name.equals(lowerCaseOptionName)) {
+      // Option names are matched as the driver parses them: lowercased, but not trimmed
+      String name = valueStart >= 0 ? option.substring(0, valueStart) : option;
+      // The driver lowercases option names with the default locale, so check that form as well as
+      // the locale-independent one. Otherwise a name containing U+0130 can bypass this on a
+      // Turkish or Azerbaijani locale JVM.
+      if (name.toLowerCase(ROOT).equals(lowerCaseOptionName)
+          || name.toLowerCase().equals(lowerCaseOptionName)) {
         value = valueStart >= 0 ? decodeOptionValue(option.substring(valueStart + 1)) : "";
       }
     }

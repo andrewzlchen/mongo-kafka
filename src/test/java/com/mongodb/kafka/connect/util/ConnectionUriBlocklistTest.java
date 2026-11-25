@@ -28,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.HashMap;
 import java.util.LinkedHashSet;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -297,6 +298,21 @@ class ConnectionUriBlocklistTest {
         ConnectionUriBlocklist.getOption(
             "mongodb://localhost:27017/?authMechanism=MONGODB-AWS&authMechanism =SCRAM-SHA-256",
             "authMechanism"));
+  }
+
+  @Test
+  @DisplayName("Should match option names the way the driver does on Turkish locales")
+  void testOptionNamesOnTurkishLocale() {
+    Locale previous = Locale.getDefault();
+    Locale.setDefault(new Locale("tr", "TR"));
+    try {
+      // U+0130 (İ) lowercases to 'i' under the Turkish locale, which is how the driver sees it
+      assertBlocked(
+          "mongodb://localhost:27017/?TLSCERTİFİCATEKEYFİLE=/etc/passwd", "TLSCERTİFİCATEKEYFİLE");
+      assertAmbient("mongodb://localhost:27017/?AUTHMECHANİSM=MONGODB-AWS", "MONGODB-AWS");
+    } finally {
+      Locale.setDefault(previous);
+    }
   }
 
   @Test
