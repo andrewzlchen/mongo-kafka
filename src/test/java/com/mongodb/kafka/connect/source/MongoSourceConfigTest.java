@@ -164,10 +164,23 @@ class MongoSourceConfigTest {
                             CONNECTION_URI_CONFIG,
                             "mongodb://localhost:27017/?authMechanism=MONGODB-AWS"))),
         () ->
-            // Nothing is blocked unless the administrator opts in
-            createSourceConfig(
-                CONNECTION_URI_CONFIG,
-                "mongodb://localhost:27017/?tlsCertificateKeyFile=/etc/cert.pem"),
+            // Options that read host files are blocked by default
+            assertThrows(
+                ConfigException.class,
+                () ->
+                    createSourceConfig(
+                        CONNECTION_URI_CONFIG,
+                        "mongodb://localhost:27017/?tlsCertificateKeyFile=/etc/cert.pem")),
+        () ->
+            // The administrator can disable the default blocklist
+            withSetting(
+                ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY,
+                "",
+                () ->
+                    new MongoSourceConfig(
+                        createConfigMap(
+                            CONNECTION_URI_CONFIG,
+                            "mongodb://localhost:27017/?tlsCertificateKeyFile=/etc/cert.pem"))),
         () ->
             // The administrator's blocklist is enforced
             withSetting(

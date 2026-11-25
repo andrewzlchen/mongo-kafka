@@ -18,7 +18,9 @@ package com.mongodb.kafka.connect.util;
 
 import static com.mongodb.kafka.connect.util.ConfigHelper.getConfigByName;
 import static java.lang.String.format;
+import static java.util.Arrays.asList;
 import static java.util.Collections.emptyList;
+import static java.util.Collections.unmodifiableList;
 import static java.util.Locale.ROOT;
 
 import java.net.URLDecoder;
@@ -42,22 +44,34 @@ public final class ConnectionUriBlocklist {
       "mongodb.kafka.connect.connection.uri.blocked.options";
   public static final String BLOCKED_OPTIONS_ENV_VAR =
       "MONGODB_KAFKA_CONNECT_CONNECTION_URI_BLOCKED_OPTIONS";
+  public static final String BLOCKED_AUTH_MECHANISMS_PROPERTY =
+      "mongodb.kafka.connect.connection.uri.blocked.auth.mechanisms";
+  public static final String BLOCKED_AUTH_MECHANISMS_ENV_VAR =
+      "MONGODB_KAFKA_CONNECT_CONNECTION_URI_BLOCKED_AUTH_MECHANISMS";
   public static final String ALLOW_HOST_CREDENTIALS_PROPERTY =
       "mongodb.kafka.connect.connection.uri.allow.host.credentials";
   public static final String ALLOW_HOST_CREDENTIALS_ENV_VAR =
       "MONGODB_KAFKA_CONNECT_CONNECTION_URI_ALLOW_HOST_CREDENTIALS";
+
+  public static final List<String> DEFAULT_BLOCKED_OPTIONS =
+      unmodifiableList(asList("tlsCertificateKeyFile", "tlsCertificateKeyFilePassword"));
+  public static final List<String> DEFAULT_BLOCKED_AUTH_MECHANISMS =
+      unmodifiableList(asList("MONGODB-AWS", "MONGODB-OIDC", "GSSAPI", "MONGODB-X509"));
 
   private static final String CONNECTION_URI_CONFIG = "connection.uri";
 
   private static final String AMBIENT_MECHANISM_PROBLEM =
       "The '%s' authentication mechanism is blocked. An administrator can set the '%s' Connect "
           + "worker setting to true to allow it.";
+  private static final String BLOCKED_AUTH_MECHANISM_PROBLEM =
+      "The '%s' authentication mechanism is blocked by the '%s' Connect worker setting. An "
+          + "administrator can remove it from that setting to allow it.";
   private static final String BLOCKED_OPTION_PROBLEM =
       "The %s connection URI option is blocked by the '%s' Connect worker setting. An "
-          + "administrator can remove it from that setting to allow it.";
+          + "administrator can change that setting to allow it.";
   private static final String BLOCKED_OPTIONS_PROBLEM =
       "The %s connection URI options are blocked by the '%s' Connect worker setting. An "
-          + "administrator can remove them from that setting to allow them.";
+          + "administrator can change that setting to allow them.";
 
   public static boolean validate(final AbstractConfig connectorConfig, final Config config) {
     String connectionString = connectorConfig.getPassword(CONNECTION_URI_CONFIG).value();
@@ -72,16 +86,23 @@ public final class ConnectionUriBlocklist {
 
   public static void validateConnectionStringOptions(
       final String configName, final String connectionString) {
-    List<String> problems =
-        findProblems(connectionString, blockedOptions(), allowHostCredentials());
+    List<String> problems = findProblems(connectionString, blockedOptions());
     if (!problems.isEmpty()) {
       throw new ConnectConfigException(configName, Password.HIDDEN, String.join(" ", problems));
     }
   }
 
-  /** The connection string options blocked by the worker administrator. Read on every call. */
   static List<String> blockedOptions() {
-    return parseBlockedOptions(setting(BLOCKED_OPTIONS_PROPERTY, BLOCKED_OPTIONS_ENV_VAR));
+    String value = setting(BLOCKED_OPTIONS_PROPERTY, BLOCKED_OPTIONS_ENV_VAR);
+    return value != null ? parseBlocklist(value) : DEFAULT_BLOCKED_OPTIONS;
+  }
+
+  static List<String> blockedAuthMechanisms() {
+    String value = setting(BLOCKED_AUTH_MECHANISMS_PROPERTY, BLOCKED_AUTH_MECHANISMS_ENV_VAR);
+    if (value != null) {
+      return parseBlocklist(value);
+    }
+    return allowHostCredentials() ? emptyList() : DEFAULT_BLOCKED_AUTH_MECHANISMS;
   }
 
   /**
@@ -97,7 +118,7 @@ public final class ConnectionUriBlocklist {
     return value != null ? value : System.getenv(environmentVariable);
   }
 
-  static List<String> parseBlockedOptions(final String listValue) {
+  static List<String> parseBlocklist(final String listValue) {
     if (listValue == null) {
       return emptyList();
     }
@@ -109,8 +130,7 @@ public final class ConnectionUriBlocklist {
 
   private static boolean addErrorMessagesIfInvalid(
       final String connectionString, final Config config) {
-    List<String> problems =
-        findProblems(connectionString, blockedOptions(), allowHostCredentials());
+    List<String> problems = findProblems(connectionString, blockedOptions());
     if (problems.isEmpty()) {
       return false;
     }
@@ -125,14 +145,11 @@ public final class ConnectionUriBlocklist {
   }
 
   private static List<String> findProblems(
-      final String connectionString,
-      final List<String> blocklist,
-      final boolean allowHostCredentials) {
+      final String connectionString, final List<String> blocklist) {
     List<String> problems = new ArrayList<>();
-    String ambientMechanismProblem =
-        findAmbientMechanismProblem(connectionString, allowHostCredentials);
-    if (ambientMechanismProblem != null) {
-      problems.add(ambientMechanismProblem);
+    String authMechanismProblem = findBlockedAuthMechanismProblem(connectionString);
+    if (authMechanismProblem != null) {
+      problems.add(authMechanismProblem);
     }
     Set<String> blockedOptions = findBlockedOptions(connectionString, blocklist);
     if (!blockedOptions.isEmpty()) {
@@ -156,27 +173,57 @@ public final class ConnectionUriBlocklist {
         + quotedOptions.get(quotedOptions.size() - 1);
   }
 
+  static String findBlockedAuthMechanismProblem(final String connectionString) {
+    if (!isBlockedAuthMechanismsConfigured()) {
+      return findAmbientMechanismProblem(connectionString, allowHostCredentials());
+    }
+    Set<String> blockedMechanisms =
+        findBlockedAuthMechanisms(connectionString, blockedAuthMechanisms());
+    return blockedMechanisms.isEmpty()
+        ? null
+        : format(
+            BLOCKED_AUTH_MECHANISM_PROBLEM,
+            blockedMechanisms.iterator().next(),
+            BLOCKED_AUTH_MECHANISMS_PROPERTY);
+  }
+
+  private static boolean isBlockedAuthMechanismsConfigured() {
+    return setting(BLOCKED_AUTH_MECHANISMS_PROPERTY, BLOCKED_AUTH_MECHANISMS_ENV_VAR) != null;
+  }
+
   static String findAmbientMechanismProblem(
       final String connectionString, final boolean allowHostCredentials) {
-    if (allowHostCredentials || connectionString == null) {
+    if (allowHostCredentials) {
       return null;
+    }
+    Set<String> blockedMechanisms =
+        findBlockedAuthMechanisms(connectionString, DEFAULT_BLOCKED_AUTH_MECHANISMS);
+    return blockedMechanisms.isEmpty()
+        ? null
+        : format(
+            AMBIENT_MECHANISM_PROBLEM,
+            blockedMechanisms.iterator().next(),
+            ALLOW_HOST_CREDENTIALS_PROPERTY);
+  }
+
+  static Set<String> findBlockedAuthMechanisms(
+      final String connectionString, final List<String> blocklist) {
+    Set<String> blockedMechanisms = new LinkedHashSet<>();
+    if (blocklist.isEmpty() || connectionString == null) {
+      return blockedMechanisms;
     }
     String authMechanism = getOption(connectionString, "authMechanism");
     if (authMechanism == null) {
-      return null;
+      return blockedMechanisms;
     }
-    switch (authMechanism.toUpperCase(ROOT)) {
-      case "MONGODB-AWS":
-        return format(AMBIENT_MECHANISM_PROBLEM, "MONGODB-AWS", ALLOW_HOST_CREDENTIALS_PROPERTY);
-      case "MONGODB-OIDC":
-        return format(AMBIENT_MECHANISM_PROBLEM, "MONGODB-OIDC", ALLOW_HOST_CREDENTIALS_PROPERTY);
-      case "GSSAPI":
-        return format(AMBIENT_MECHANISM_PROBLEM, "GSSAPI", ALLOW_HOST_CREDENTIALS_PROPERTY);
-      case "MONGODB-X509":
-        return format(AMBIENT_MECHANISM_PROBLEM, "MONGODB-X509", ALLOW_HOST_CREDENTIALS_PROPERTY);
-      default:
-        return null;
+    String normalisedMechanism = authMechanism.trim().toUpperCase(ROOT);
+    for (String blockedMechanism : blocklist) {
+      if (blockedMechanism.trim().toUpperCase(ROOT).equals(normalisedMechanism)) {
+        blockedMechanisms.add(normalisedMechanism);
+        break;
+      }
     }
+    return blockedMechanisms;
   }
 
   static Set<String> findBlockedOptions(
@@ -206,11 +253,6 @@ public final class ConnectionUriBlocklist {
     return blockedOptions;
   }
 
-  /**
-   * Returns the value of a connection string option, or null if the option is not present. Option
-   * names are matched case-insensitively, and the last value is returned for duplicated options,
-   * which is how the driver resolves them.
-   */
   static String getOption(final String connectionString, final String optionName) {
     int queryStart = connectionString.indexOf('?');
     if (queryStart < 0) {

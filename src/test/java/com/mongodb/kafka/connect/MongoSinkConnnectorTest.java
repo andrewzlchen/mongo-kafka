@@ -173,19 +173,22 @@ class MongoSinkConnnectorTest {
     // A connector property must not be able to disable the administrator's policy
     configs.put("connection.uri.blocklist", "");
 
-    // Nothing is blocked unless the administrator opts in
+    // The default blocklist is enforced, and connector properties cannot relax it
     List<String> defaultErrors = connectionUriErrors(sinkConnector.validate(configs));
     assertTrue(
-        defaultErrors.stream().noneMatch(m -> m.contains("'tlsCertificateKeyFile'")),
-        "connection.uri must not be reported as blocked: " + defaultErrors);
+        defaultErrors.stream().anyMatch(m -> m.contains("'tlsCertificateKeyFile'")),
+        "connection.uri should be reported as blocked: " + defaultErrors);
+    assertTrue(
+        defaultErrors.stream().noneMatch(m -> m.contains("'connectTimeoutMS'")),
+        "connectTimeoutMS must not be blocked by default: " + defaultErrors);
 
-    // The administrator can opt in to blocking the option
+    // The administrator can block additional options
     String previous = System.getProperty(ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY);
-    System.setProperty(ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY, "tlsCertificateKeyFile");
+    System.setProperty(ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY, "connectTimeoutMS");
     try {
       List<String> errors = connectionUriErrors(sinkConnector.validate(configs));
       assertTrue(
-          errors.stream().anyMatch(m -> m.contains("'tlsCertificateKeyFile'")),
+          errors.stream().anyMatch(m -> m.contains("'connectTimeoutMS'")),
           "connection.uri should be reported as blocked: " + errors);
     } finally {
       if (previous == null) {

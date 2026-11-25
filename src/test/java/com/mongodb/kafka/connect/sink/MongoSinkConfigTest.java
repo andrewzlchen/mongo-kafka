@@ -188,11 +188,23 @@ class MongoSinkConfigTest {
                             CONNECTION_URI_CONFIG,
                             "mongodb://localhost:27017/?authMechanism=MONGODB-AWS"))),
         () ->
-            // Nothing is blocked unless the administrator opts in
-            new MongoSinkConfig(
-                createConfigMap(
-                    CONNECTION_URI_CONFIG,
-                    "mongodb://localhost:27017/?tlsCertificateKeyFile=/etc/cert.pem")),
+            // Options that read host files are blocked by default
+            assertThrows(
+                ConfigException.class,
+                () ->
+                    createSinkConfig(
+                        CONNECTION_URI_CONFIG,
+                        "mongodb://localhost:27017/?tlsCertificateKeyFile=/etc/cert.pem")),
+        () ->
+            // The administrator can disable the default blocklist
+            withSetting(
+                ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY,
+                "",
+                () ->
+                    new MongoSinkConfig(
+                        createConfigMap(
+                            CONNECTION_URI_CONFIG,
+                            "mongodb://localhost:27017/?tlsCertificateKeyFile=/etc/cert.pem"))),
         () ->
             // The administrator's blocklist is enforced
             withSetting(

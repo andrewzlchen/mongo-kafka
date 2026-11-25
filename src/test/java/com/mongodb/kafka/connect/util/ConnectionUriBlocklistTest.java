@@ -48,18 +48,34 @@ class ConnectionUriBlocklistTest {
   @AfterEach
   void clearSettings() {
     System.clearProperty(ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY);
+    System.clearProperty(ConnectionUriBlocklist.BLOCKED_AUTH_MECHANISMS_PROPERTY);
     System.clearProperty(ConnectionUriBlocklist.ALLOW_HOST_CREDENTIALS_PROPERTY);
   }
 
   @Test
-  @DisplayName("Should block nothing unless the administrator opts in")
-  void testBlocklistIsOptIn() {
-    assertEquals(emptyList(), ConnectionUriBlocklist.blockedOptions());
+  @DisplayName("Should block connection string options that read host files by default")
+  void testDefaultBlockedOptions() {
     assertEquals(
-        emptyBlocked(),
-        ConnectionUriBlocklist.findBlockedOptions(
-            "mongodb://localhost:27017/?tlsCertificateKeyFile=/etc/passwd",
-            ConnectionUriBlocklist.blockedOptions()));
+        asList("tlsCertificateKeyFile", "tlsCertificateKeyFilePassword"),
+        ConnectionUriBlocklist.blockedOptions());
+    assertBlocked(
+        "mongodb://localhost:27017/?tlsCertificateKeyFile=/etc/passwd", "tlsCertificateKeyFile");
+    assertBlocked(
+        "mongodb://localhost:27017/?tlsCertificateKeyFilePassword=secret",
+        "tlsCertificateKeyFilePassword");
+    assertTrue(
+        getErrorMessages(
+                validateConnectionUri(
+                    "mongodb://localhost:27017/?tlsCertificateKeyFile=/etc/passwd"))
+            .contains("tlsCertificateKeyFile"));
+  }
+
+  @Test
+  @DisplayName("Should let the administrator disable the default option blocklist")
+  void testEmptyOptionBlocklistDisablesCheck() {
+    System.setProperty(ConnectionUriBlocklist.BLOCKED_OPTIONS_PROPERTY, "");
+
+    assertEquals(emptyList(), ConnectionUriBlocklist.blockedOptions());
     assertEquals(
         "",
         getErrorMessages(
@@ -69,11 +85,11 @@ class ConnectionUriBlocklistTest {
   @Test
   @DisplayName("Should parse the administrator's comma-separated blocklist")
   void testParseBlockedOptions() {
-    assertEquals(emptyList(), ConnectionUriBlocklist.parseBlockedOptions(null));
-    assertEquals(emptyList(), ConnectionUriBlocklist.parseBlockedOptions(""));
+    assertEquals(emptyList(), ConnectionUriBlocklist.parseBlocklist(null));
+    assertEquals(emptyList(), ConnectionUriBlocklist.parseBlocklist(""));
     assertEquals(
         asList("tlsCertificateKeyFile", "replicaSet"),
-        ConnectionUriBlocklist.parseBlockedOptions(" tlsCertificateKeyFile , , replicaSet "));
+        ConnectionUriBlocklist.parseBlocklist(" tlsCertificateKeyFile , , replicaSet "));
   }
 
   @Test
@@ -97,6 +113,63 @@ class ConnectionUriBlocklistTest {
     // Matching is case-insensitive
     assertBlocked(
         "mongodb://localhost:27017/?TLSCERTIFICATEKEYFILE=/etc/passwd", "TLSCERTIFICATEKEYFILE");
+  }
+
+  @Test
+  @DisplayName("Should block the host-credential authentication mechanisms by default")
+  void testDefaultBlockedAuthMechanisms() {
+    assertEquals(
+        asList("MONGODB-AWS", "MONGODB-OIDC", "GSSAPI", "MONGODB-X509"),
+        ConnectionUriBlocklist.blockedAuthMechanisms());
+    assertEquals(
+        blocked("MONGODB-AWS"),
+        ConnectionUriBlocklist.findBlockedAuthMechanisms(
+            "mongodb://localhost:27017/?authMechanism=mongodb-aws",
+            ConnectionUriBlocklist.blockedAuthMechanisms()));
+    assertEquals(
+        emptyBlocked(),
+        ConnectionUriBlocklist.findBlockedAuthMechanisms(
+            "mongodb://localhost:27017/?authMechanism=SCRAM-SHA-256",
+            ConnectionUriBlocklist.blockedAuthMechanisms()));
+
+    String problem =
+        ConnectionUriBlocklist.findBlockedAuthMechanismProblem(
+            "mongodb://localhost:27017/?authMechanism=MONGODB-AWS");
+    assertTrue(problem != null && problem.contains("MONGODB-AWS"), "got: " + problem);
+    assertTrue(
+        problem.contains(ConnectionUriBlocklist.ALLOW_HOST_CREDENTIALS_PROPERTY),
+        "expected the remedy setting to be named, got: " + problem);
+  }
+
+  @Test
+  @DisplayName("Should apply the administrator's authentication mechanism blocklist")
+  void testSystemPropertyBlocksAuthMechanisms() {
+    System.setProperty(
+        ConnectionUriBlocklist.BLOCKED_AUTH_MECHANISMS_PROPERTY, " PLAIN , GSSAPI , ");
+
+    assertEquals(asList("PLAIN", "GSSAPI"), ConnectionUriBlocklist.blockedAuthMechanisms());
+    String problem =
+        ConnectionUriBlocklist.findBlockedAuthMechanismProblem(
+            "mongodb://localhost:27017/?authMechanism=plain");
+    assertTrue(problem != null && problem.contains("PLAIN"), "got: " + problem);
+    assertTrue(
+        problem.contains(ConnectionUriBlocklist.BLOCKED_AUTH_MECHANISMS_PROPERTY),
+        "expected the configured setting to be named, got: " + problem);
+    // The configured list replaces the defaults, so an ambient mechanism can be allowed
+    assertNull(
+        ConnectionUriBlocklist.findBlockedAuthMechanismProblem(
+            "mongodb://localhost:27017/?authMechanism=MONGODB-AWS"));
+  }
+
+  @Test
+  @DisplayName("Should block nothing when the authentication mechanism blocklist is empty")
+  void testEmptyAuthMechanismBlocklistDisablesCheck() {
+    System.setProperty(ConnectionUriBlocklist.BLOCKED_AUTH_MECHANISMS_PROPERTY, "");
+
+    assertEquals(emptyList(), ConnectionUriBlocklist.blockedAuthMechanisms());
+    assertNull(
+        ConnectionUriBlocklist.findBlockedAuthMechanismProblem(
+            "mongodb://localhost:27017/?authMechanism=MONGODB-AWS"));
   }
 
   @Test
@@ -288,6 +361,22 @@ class ConnectionUriBlocklistTest {
         "expected the blocked option to be named, got: " + e2.getMessage());
     assertFalse(
         e2.getMessage().contains("super-secret"), "error message must not contain the secret");
+
+    // Authentication mechanisms added to the blocklist are rejected as well
+    System.setProperty(ConnectionUriBlocklist.BLOCKED_AUTH_MECHANISMS_PROPERTY, "SCRAM-SHA-256");
+    ConfigException e3 =
+        assertThrows(
+            ConfigException.class,
+            () ->
+                ConnectionUriBlocklist.validateConnectionStringOptions(
+                    CONNECTION_URI,
+                    "mongodb://user:super-secret@localhost:27017/"
+                        + "?authMechanism=SCRAM-SHA-256"));
+    assertTrue(
+        e3.getMessage().contains("SCRAM-SHA-256"),
+        "expected the mechanism to be named, got: " + e3.getMessage());
+    assertFalse(
+        e3.getMessage().contains("super-secret"), "error message must not contain the secret");
   }
 
   @Test
