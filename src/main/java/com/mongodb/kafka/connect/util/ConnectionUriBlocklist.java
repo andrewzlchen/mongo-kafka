@@ -240,14 +240,12 @@ public final class ConnectionUriBlocklist {
     for (String blockedOption : blocklist) {
       String trimmed = blockedOption.trim();
       normalisedBlocklist.add(trimmed.toLowerCase(Locale.ROOT));
-      // The driver lowercases option names with the default locale, not Locale.ROOT
       normalisedBlocklist.add(trimmed.toLowerCase());
     }
     Set<String> blockedOptions = new LinkedHashSet<>();
     Set<String> seenOptions = new LinkedHashSet<>();
     for (String option : connectionString.substring(queryStart + 1).split("&|;")) {
       int valueStart = option.indexOf('=');
-      // Option names are matched as the driver parses them: lowercased, but not trimmed
       String optionName = valueStart >= 0 ? option.substring(0, valueStart) : option;
       String rootName = optionName.toLowerCase(Locale.ROOT);
       String driverName = optionName.toLowerCase();
@@ -270,11 +268,7 @@ public final class ConnectionUriBlocklist {
     String value = null;
     for (String option : connectionString.substring(queryStart + 1).split("&|;")) {
       int valueStart = option.indexOf('=');
-      // Option names are matched as the driver parses them: lowercased, but not trimmed
       String name = valueStart >= 0 ? option.substring(0, valueStart) : option;
-      // The driver lowercases option names with the default locale, so check that form as well as
-      // the locale-independent one. Otherwise a name containing U+0130 can bypass this on a
-      // Turkish or Azerbaijani locale JVM.
       if (name.toLowerCase(ROOT).equals(lowerCaseOptionName)
           || name.toLowerCase().equals(lowerCaseOptionName)) {
         value = valueStart >= 0 ? decodeOptionValue(option.substring(valueStart + 1)) : "";
